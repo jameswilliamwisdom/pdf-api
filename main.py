@@ -1,12 +1,10 @@
 import os
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi_x402 import init_x402, pay, PaymentMiddleware
 from pdf_extractor import extract_text_from_pdf
 
-load_dotenv()
 
 app = FastAPI(
     title="PDF Extraction API",
