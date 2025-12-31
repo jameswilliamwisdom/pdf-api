@@ -1,0 +1,12 @@
+cd ~/pdf-api
+nano requirements.txt
+git add requirements.txt
+git commit -m "Add python-dotenv dependency"
+git push
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+pymupdf>=1.23.0
+httpx>=0.25.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
