@@ -1,9 +1,13 @@
 import os
-from fastapi import FastAPI, HTTPException, UploadFile, File, Body
+import secrets
+from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Header
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi_x402 import init_x402, pay, PaymentMiddleware
 from pdf_extractor import extract_text_from_pdf
+
+# API key for authenticated (payment-free) access
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 
 
 app = FastAPI(
@@ -43,6 +47,24 @@ async def extract(file: UploadFile = File(...)):
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="File must be a PDF")
     
+    try:
+        contents = await file.read()
+        result = extract_text_from_pdf(contents)
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/extract/key")
+async def extract_with_key(
+    file: UploadFile = File(...),
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    """Extract text from an uploaded PDF using API key auth (no x402 payment)."""
+    if not INTERNAL_API_KEY or not secrets.compare_digest(x_api_key, INTERNAL_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
     try:
         contents = await file.read()
         result = extract_text_from_pdf(contents)
