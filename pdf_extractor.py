@@ -1,3 +1,5 @@
+import base64
+
 import fitz  # PyMuPDF
 from typing import Optional
 
@@ -6,7 +8,8 @@ def extract_text_from_pdf(
     pdf_bytes: bytes,
     max_pages: Optional[int] = None,
     test_mode: bool = False,
-    ocr: str = "off"
+    ocr: str = "off",
+    render_images: bool = False
 ) -> dict:
     """
     Extract text from a PDF file.
@@ -45,11 +48,23 @@ def extract_text_from_pdf(
         else:
             text = page.get_text()
 
-        pages.append({
+        page_dict = {
             "page": page_num + 1,
             "text": text,
             "ocr": used_ocr
-        })
+        }
+
+        if render_images:
+            page_rect = page.rect
+            page_max_pts = max(page_rect.width, page_rect.height)
+            desired_dpi = min(int(1568 / page_max_pts * 72), 150)
+            desired_dpi = max(desired_dpi, 72)
+            pix = page.get_pixmap(dpi=desired_dpi)
+            img_bytes = pix.tobytes(output="jpeg", jpg_quality=80)
+            page_dict["image_base64"] = base64.b64encode(img_bytes).decode("ascii")
+            page_dict["image_media_type"] = "image/jpeg"
+
+        pages.append(page_dict)
         full_text.append(text)
 
     doc.close()

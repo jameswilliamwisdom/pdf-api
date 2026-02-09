@@ -42,14 +42,14 @@ async def health():
 
 @pay("$0.01")
 @app.post("/extract")
-async def extract(file: UploadFile = File(...), ocr: str = Query("off")):
+async def extract(file: UploadFile = File(...), ocr: str = Query("off"), render_images: bool = Query(False)):
     """Extract text from an uploaded PDF."""
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="File must be a PDF")
 
     try:
         contents = await file.read()
-        result = extract_text_from_pdf(contents, ocr=ocr)
+        result = extract_text_from_pdf(contents, ocr=ocr, render_images=render_images)
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -60,6 +60,7 @@ async def extract_with_key(
     file: UploadFile = File(...),
     x_api_key: str = Header(..., alias="X-API-Key"),
     ocr: str = Query("off"),
+    render_images: bool = Query(False),
 ):
     """Extract text from an uploaded PDF using API key auth (no x402 payment)."""
     if not INTERNAL_API_KEY or not secrets.compare_digest(x_api_key, INTERNAL_API_KEY):
@@ -68,7 +69,7 @@ async def extract_with_key(
         raise HTTPException(status_code=400, detail="File must be a PDF")
     try:
         contents = await file.read()
-        result = extract_text_from_pdf(contents, ocr=ocr)
+        result = extract_text_from_pdf(contents, ocr=ocr, render_images=render_images)
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -85,14 +86,14 @@ async def test_extract_info():
 
 
 @app.post("/test/extract")
-async def test_extract(file: UploadFile = File(...), ocr: str = Query("off")):
+async def test_extract(file: UploadFile = File(...), ocr: str = Query("off"), render_images: bool = Query(False)):
     """Extract text from first 3 pages of a PDF (free test endpoint)."""
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="File must be a PDF")
 
     try:
         contents = await file.read()
-        result = extract_text_from_pdf(contents, max_pages=3, test_mode=True, ocr=ocr)
+        result = extract_text_from_pdf(contents, max_pages=3, test_mode=True, ocr=ocr, render_images=render_images)
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
