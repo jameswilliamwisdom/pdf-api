@@ -1,6 +1,6 @@
 import os
 import secrets
-from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Header, Query, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Header, Query
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi_x402 import init_x402, pay, PaymentMiddleware
@@ -8,13 +8,6 @@ from pdf_extractor import extract_text_from_pdf
 
 # API key for authenticated (payment-free) access
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
-
-# Deprecation notice — v2 sunsets 2026-05-23
-DEPRECATION = {
-    "notice": "x402-mcp-server v2 is deprecated. Sunsets 2026-05-23. Migrate to Bismuth.",
-    "sunset_date": "2026-05-23",
-    "migration_url": "https://bismuth.one/migrate",
-}
 
 
 app = FastAPI(
@@ -35,16 +28,6 @@ init_x402(
 app.add_middleware(PaymentMiddleware)
 
 
-# Deprecation middleware — adds sunset headers to every response
-@app.middleware("http")
-async def add_deprecation_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Deprecation"] = "true"
-    response.headers["X-Sunset-Date"] = DEPRECATION["sunset_date"]
-    response.headers["Link"] = f'<{DEPRECATION["migration_url"]}>; rel="sunset"'
-    return response
-
-
 @app.get("/")
 async def root():
     """Serve the landing page."""
@@ -54,7 +37,7 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "_deprecation": DEPRECATION}
+    return {"status": "ok"}
 
 
 @pay("$0.01")
@@ -67,7 +50,7 @@ async def extract(file: UploadFile = File(...), ocr: str = Query("off"), render_
     try:
         contents = await file.read()
         result = extract_text_from_pdf(contents, ocr=ocr, render_images=render_images)
-        return JSONResponse(content={**result, "_deprecation": DEPRECATION})
+        return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -87,7 +70,7 @@ async def extract_with_key(
     try:
         contents = await file.read()
         result = extract_text_from_pdf(contents, ocr=ocr, render_images=render_images)
-        return JSONResponse(content={**result, "_deprecation": DEPRECATION})
+        return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -98,8 +81,7 @@ async def test_extract_info():
     return {
         "endpoint": "POST /test/extract",
         "description": "Upload a PDF to extract text (first 3 pages only, for testing)",
-        "usage": "curl -X POST -F 'file=@document.pdf' https://your-api/test/extract",
-        "_deprecation": DEPRECATION,
+        "usage": "curl -X POST -F 'file=@document.pdf' https://your-api/test/extract"
     }
 
 
@@ -112,7 +94,7 @@ async def test_extract(file: UploadFile = File(...), ocr: str = Query("off"), re
     try:
         contents = await file.read()
         result = extract_text_from_pdf(contents, max_pages=3, test_mode=True, ocr=ocr, render_images=render_images)
-        return JSONResponse(content={**result, "_deprecation": DEPRECATION})
+        return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
