@@ -28,6 +28,39 @@ init_x402(
 app.add_middleware(PaymentMiddleware)
 
 
+@app.get("/.well-known/x402")
+async def well_known_x402():
+    """x402 discovery — indexed by x402scan and other ecosystem crawlers."""
+    return {
+        "version": 1,
+        "x402Version": 2,
+        "name": "Bismuth PDF Extraction",
+        "description": "Extract text from PDF documents with OCR (Tesseract) and vision mode support. Part of the Bismuth utility API suite for AI agents.",
+        "apiVersion": "1.0.0",
+        "network": "base",
+        "resource": {
+            "url": "https://pdf-api-production-cf1e.up.railway.app",
+            "description": "Bismuth PDF Extraction — x402 USDC micropayments on Base",
+            "mimeType": "application/json",
+        },
+        "services": [
+            {
+                "name": "Extract PDF",
+                "endpoint": "/extract",
+                "method": "POST",
+                "price": "$0.01",
+                "description": "Extract text from a PDF file. Supports OCR (?ocr=on) and vision rendering (?render_images=true)",
+            },
+        ],
+        "resources": ["POST /extract"],
+        "documentation": "https://pdf-api-production-cf1e.up.railway.app/docs",
+        "provider": {
+            "name": "Bismuth",
+            "url": "https://usebismuth.com",
+        },
+    }
+
+
 @app.get("/")
 async def root():
     """Serve the landing page."""
