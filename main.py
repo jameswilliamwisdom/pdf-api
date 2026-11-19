@@ -1,8 +1,12 @@
+import logging
 import os
 import secrets
+import time
+from collections import deque
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Header, Query
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
@@ -11,7 +15,9 @@ from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.schemas import Network
 from x402.server import x402ResourceServer
 
-from pdf_extractor import extract_text_from_pdf
+from pdf_extractor import InvalidPDF, VALID_OCR_MODES, extract_text_from_pdf
+
+logger = logging.getLogger("pdf-api")
 
 # API key for authenticated (payment-free) access
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
@@ -50,6 +56,86 @@ app.add_middleware(PaymentMiddlewareASGI, routes=_paid_routes, server=_x402_serv
 
 
 # =============================================================================
+# Upload size limits (security review 2026-11-18)
+# =============================================================================
+# Uploads were unbounded: the whole body was spooled and read into memory
+# before any check. The limit is enforced from Content-Length, before the
+# body is read and before payment; the server rejects a body that does not
+# match its declared length, so the header can be relied on. Uploads sent
+# without a length are refused.
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024        # paid and API-key routes
+MAX_TEST_UPLOAD_BYTES = 5 * 1024 * 1024    # free test route
+_UPLOAD_LIMITS = {
+    "/extract": MAX_UPLOAD_BYTES,
+    "/extract/key": MAX_UPLOAD_BYTES,
+    "/test/extract": MAX_TEST_UPLOAD_BYTES,
+}
+
+
+class UploadSizeLimit:
+    """Pure ASGI middleware: reject oversized or unsized uploads up front."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        limit = _UPLOAD_LIMITS.get(scope.get("path")) if scope["type"] == "http" else None
+        if limit is None or scope["method"] != "POST":
+            return await self.app(scope, receive, send)
+        declared = dict(scope["headers"]).get(b"content-length", b"").decode("latin-1")
+        if not declared.isdigit():
+            status, detail = 411, "Content-Length required"
+        elif int(declared) > limit:
+            status, detail = 413, f"File too large. Limit is {limit // (1024 * 1024)}MB."
+        else:
+            return await self.app(scope, receive, send)
+        response = JSONResponse(status_code=status, content={"detail": detail})
+        await response(scope, receive, send)
+
+
+# Added after the payment middleware, so it runs before it: an oversized
+# upload is refused without a payment being taken.
+app.add_middleware(UploadSizeLimit)
+
+# The free test route does real work per call; one shared budget bounds it.
+FREE_TEST_MAX_PER_MINUTE = 30
+_free_test_calls: deque = deque()
+
+
+def _ocr_mode(ocr: str) -> str:
+    """Validate the ?ocr= value. The published docs say ?ocr=on, which the
+    extractor used to ignore silently (it only knew auto and force); treat
+    it as auto, which is what the docs describe."""
+    mode = "auto" if ocr == "on" else ocr
+    if mode not in VALID_OCR_MODES:
+        raise HTTPException(status_code=400, detail=f"ocr must be one of: on, {', '.join(VALID_OCR_MODES)}")
+    return mode
+
+
+def _check_is_pdf_upload(file: UploadFile) -> None:
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+
+async def _run_extraction(file: UploadFile, limit: int, **kwargs) -> JSONResponse:
+    contents = await file.read(limit + 1)
+    if len(contents) > limit:
+        raise HTTPException(status_code=413, detail="File too large.")
+    try:
+        # Extraction is CPU-bound; keep it off the event loop so health
+        # checks and other requests are still served.
+        result = await run_in_threadpool(extract_text_from_pdf, contents, **kwargs)
+    except InvalidPDF as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Library error text stays in the log.
+        logger.error("extraction failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="extraction_failed")
+    return JSONResponse(content=result)
+
+
+# =============================================================================
 # OpenAPI x402 v2 Extensions + Favicon
 # =============================================================================
 
@@ -63,7 +149,7 @@ def _openapi_with_x402_v2():
     schema["info"]["x-guidance"] = (
         "Bismuth PDF Extraction — Text extraction from PDF documents for AI agents. "
         "POST /extract with a multipart PDF file returns extracted text ($0.01 USDC on Base). "
-        "Query params: ?ocr=on (Tesseract OCR for scanned PDFs), "
+        "Query params: ?ocr=on (Tesseract OCR for scanned PDFs; also auto, force), "
         "?render_images=true (vision-based rendering). "
         "Free test at POST /test/extract (first 3 pages only). "
         "Alternate API-key auth at POST /extract/key."
@@ -153,15 +239,9 @@ async def health():
 @app.post("/extract")
 async def extract(file: UploadFile = File(...), ocr: str = Query("off"), render_images: bool = Query(False)):
     """Extract text from an uploaded PDF."""
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="File must be a PDF")
-
-    try:
-        contents = await file.read()
-        result = extract_text_from_pdf(contents, ocr=ocr, render_images=render_images)
-        return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    ocr = _ocr_mode(ocr)
+    _check_is_pdf_upload(file)
+    return await _run_extraction(file, MAX_UPLOAD_BYTES, ocr=ocr, render_images=render_images)
 
 
 @app.post("/extract/key")
@@ -172,16 +252,11 @@ async def extract_with_key(
     render_images: bool = Query(False),
 ):
     """Extract text from an uploaded PDF using API key auth (no x402 payment)."""
-    if not INTERNAL_API_KEY or not secrets.compare_digest(x_api_key, INTERNAL_API_KEY):
+    if not INTERNAL_API_KEY or not secrets.compare_digest(x_api_key.encode(), INTERNAL_API_KEY.encode()):
         raise HTTPException(status_code=401, detail="Invalid API key")
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="File must be a PDF")
-    try:
-        contents = await file.read()
-        result = extract_text_from_pdf(contents, ocr=ocr, render_images=render_images)
-        return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    ocr = _ocr_mode(ocr)
+    _check_is_pdf_upload(file)
+    return await _run_extraction(file, MAX_UPLOAD_BYTES, ocr=ocr, render_images=render_images)
 
 
 @app.api_route("/test/extract", methods=["GET", "HEAD"])
@@ -197,15 +272,20 @@ async def test_extract_info():
 @app.post("/test/extract")
 async def test_extract(file: UploadFile = File(...), ocr: str = Query("off"), render_images: bool = Query(False)):
     """Extract text from first 3 pages of a PDF (free test endpoint)."""
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="File must be a PDF")
+    ocr = _ocr_mode(ocr)
+    _check_is_pdf_upload(file)
 
-    try:
-        contents = await file.read()
-        result = extract_text_from_pdf(contents, max_pages=3, test_mode=True, ocr=ocr, render_images=render_images)
-        return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    now = time.monotonic()
+    while _free_test_calls and now - _free_test_calls[0] > 60:
+        _free_test_calls.popleft()
+    if len(_free_test_calls) >= FREE_TEST_MAX_PER_MINUTE:
+        raise HTTPException(status_code=429, detail="free_test_busy")
+    _free_test_calls.append(now)
+
+    return await _run_extraction(
+        file, MAX_TEST_UPLOAD_BYTES,
+        max_pages=3, test_mode=True, ocr=ocr, render_images=render_images,
+    )
 
 
 if __name__ == "__main__":
